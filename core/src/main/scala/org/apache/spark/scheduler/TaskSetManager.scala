@@ -31,7 +31,7 @@ import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.scheduler.SchedulingMode._
 import org.apache.spark.util.{AccumulatorV2, Clock, SystemClock, Utils}
 import org.apache.spark.util.collection.MedianHeap
-
+import scala.util.Random
 /**
  * Schedules the tasks within a single TaskSet in the TaskSchedulerImpl. This class keeps track of
  * each task, retries tasks if they fail (up to a limited number of times), and
@@ -271,6 +271,25 @@ private[spark] class TaskSetManager(
    * This method also cleans up any tasks in the list that have already
    * been launched, since we want that to happen lazily.
    */
+  private def mydequeueTaskFromList(
+      execId: String,
+      host: String,
+      list: ArrayBuffer[Int]): Option[Int] = {
+    var indexOffset = list.size
+    while (indexOffset > 0) {
+      indexOffset -= 1
+      val myind = Random.nextInt(list.size)
+      val index = list(myind)
+      if (!isTaskBlacklistedOnExecOrNode(index, execId, host)) {
+        // This should almost always be list.trimEnd(1) to remove tail
+        list.remove(myind)
+        if (copiesRunning(index) == 0 && !successful(index)) {
+          return Some(index)
+        }
+      }
+    }
+    None
+  }
   private def dequeueTaskFromList(
       execId: String,
       host: String,
@@ -386,6 +405,20 @@ private[spark] class TaskSetManager(
    *
    * @return An option containing (task index within the task set, locality, is speculative?)
    */
+  private def mydequeueTask(execId: String, host: String, maxLocality: TaskLocality.Value)
+    : Option[(Int, TaskLocality.Value, Boolean)] =
+  {
+   
+      for (index <- mydequeueTaskFromList(execId, host, allPendingTasks)) {
+        return Some((index, TaskLocality.ANY, false))
+      }
+    
+
+    // find a speculative task if all others tasks have been scheduled
+    dequeueSpeculativeTask(execId, host, maxLocality).map {
+      case (taskIndex, allowedLocality) => (taskIndex, allowedLocality, true)}
+  }
+  
   private def dequeueTask(execId: String, host: String, maxLocality: TaskLocality.Value)
     : Option[(Int, TaskLocality.Value, Boolean)] =
   {
@@ -461,7 +494,7 @@ private[spark] class TaskSetManager(
         }
       }
 
-      dequeueTask(execId, host, allowedLocality).map { case ((index, taskLocality, speculative)) =>
+      mydequeueTask(execId, host, allowedLocality).map { case ((index, taskLocality, speculative)) =>
         // Found a task; do some bookkeeping and return a task description
         val task = tasks(index)
         val taskId = sched.newTaskId()
@@ -502,7 +535,7 @@ private[spark] class TaskSetManager(
         // We used to log the time it takes to serialize the task, but task size is already
         // a good proxy to task serialization time.
         // val timeTaken = clock.getTime() - startTime
-        val taskName = s"task ${info.id} in stage ${taskSet.id}"
+        val taskName = s"task ${info.id},${info.index}th task from taskset, in stage ${taskSet.id}"
         logInfo(s"Starting $taskName (TID $taskId, $host, executor ${info.executorId}, " +
           s"partition ${task.partitionId}, $taskLocality, ${serializedTask.limit()} bytes)")
 
